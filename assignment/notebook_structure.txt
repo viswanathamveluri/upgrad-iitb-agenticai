@@ -1,0 +1,470 @@
+
+--- Cell 0 (markdown) ---
+# MLOps Assignment: Predictive Maintenance Classification
+### Starter Notebook
+
+**Domain:** Industrial IoT / Manufacturing
+**Task:** Multi-class failure type prediction
+**Tools:** Pandera, MLflow, Optuna, Evidently, SHAP
+
+---
+
+## Business Context
+
+A heavy-equipment manufacturer runs 10,000+ machines on the shop floor.
+Each machine continuously streams six sensor readings. When a machine fails,
+production halts - at a cost of ₹8-15 lakh per hour of downtime.
+
+Your job is to build a full MLOps pipeline that:
+1. Validates incoming sensor data before it enters the pipeline (Pandera)
+2. Trains and tracks a multi-class failure classifier (MLflow)
+3. Tunes hyperparameters and registers the best model (Optuna + MLflow Registry)
+4. Monitors the deployed model for distributional shift (Evidently)
+5. Explains why the model predicts a specific failure type (SHAP)
+
+**Files provided:**
+- `data/train.csv`   - 6,993 labelled sensor readings (historical baseline)
+- `data/current.csv` - 1,499 readings from the current stable production batch
+- `data/stress.csv`  - 1,499 readings from a heavy-load production period
+
+**Failure classes:**
+
+| Code | Name | Description |
+|------|------|-------------|
+| 0 | No Failure | Machine operating normally |
+| 1 | TWF | Tool Wear Failure |
+| 2 | HDF | Heat Dissipation Failure |
+| 3 | PWF | Power Failure |
+| 4 | OSF | Overstrain Failure |
+
+> Visual anchor: use the generated `eda_distributions.png` early (Section 1.3) to ground your expectations before drift and SHAP interpretation.
+> Stress-batch goal: diagnose *why* the model is stale under shifted operating conditions, not to force perfect predictions on `stress.csv`.
+> **Submission:** Submit this notebook (`.ipynb`) with all cells executed.
+> Do not change the section structure or remove any markdown cells.
+
+--- Cell 1 (markdown) ---
+## **1. Data Loading, Schema Validation & EDA** <font color=red>[15 marks]</font>
+
+--- Cell 2 (markdown) ---
+### **1.1** <font color=red>[3 marks]</font> Load the datasets
+
+Load `train.csv`, `current.csv`, and `stress.csv` from the `data/` folder.
+Print the shape of each and display the first 5 rows of the training set.
+
+
+--- Cell 3 (code) ---
+import warnings
+warnings.filterwarnings('ignore')
+import os
+os.environ['DISABLE_PANDERA_IMPORT_WARNING'] = 'True'
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# TODO: Load the three datasets
+train   = pd.read_csv('data/train.csv')
+current = pd.read_csv('data/current.csv')
+stress  = pd.read_csv('data/stress.csv')
+
+# TODO: Print shapes
+print(f'train  : {train.shape}')
+print(f'current: {current.shape}')
+print(f'stress : {stress.shape}')
+
+CLASS_NAMES = {0: 'No Failure', 1: 'TWF', 2: 'HDF', 3: 'PWF', 4: 'OSF'}
+
+# TODO: Display first 5 rows of train
+train.head()
+
+
+--- Cell 4 (markdown) ---
+### **1.2** <font color=red>[5 marks]</font> Define and apply a Pandera schema
+
+Define a `DataFrameSchema` enforcing the domain constraints below.
+Validate `train` and `current` (must pass). Validate `stress` with `lazy=True`.
+
+| Column | Type | Constraint |
+|--------|------|------------|
+| Type | str | one of L, M, H |
+| Air temperature | float | [295.0, 305.0] K |
+| Process temperature | float | [305.0, 315.0] K |
+| Rotational speed | int64 | [1000, 2900] rpm |
+| Torque | float | [3.0, 80.0] Nm |
+| Tool wear | int64 | [0, 253] min |
+| Failure_Type | int64 | 0, 1, 2, 3, 4 |
+
+
+> `stress.csv` may still pass schema validation. That is fine: it is designed to be valid but drifted.
+> Hint: valid data can still be statistically unusual. Before Section 3, compare the mean of `Rotational speed` in `current` vs `stress`.
+
+--- Cell 5 (code) ---
+import pandera as pa
+from pandera import Column, DataFrameSchema, Check
+
+# TODO: Define the schema
+schema = DataFrameSchema({
+    # fill in each column constraint
+})
+
+def fix_dtypes(df):
+    df = df.copy()
+    df['Rotational speed'] = df['Rotational speed'].astype('int64')
+    df['Tool wear']        = df['Tool wear'].astype('int64')
+    df['Failure_Type']     = df['Failure_Type'].astype('int64')
+    return df
+
+train   = fix_dtypes(train)
+current = fix_dtypes(current)
+stress  = fix_dtypes(stress)
+
+# TODO: Validate train and current
+# schema.validate(train)
+# schema.validate(current)
+
+# TODO: Validate stress with lazy=True and print violation summary
+
+
+--- Cell 6 (markdown) ---
+### **1.3** <font color=red>[4 marks]</font> Exploratory Data Analysis
+
+1. Print the class distribution of `Failure_Type`. Is it balanced?
+2. Plot the distribution of `Torque` and `Tool wear` split by failure class (failures only).
+3. Print the `Type` (L/M/H) distribution.
+
+
+--- Cell 7 (code) ---
+# TODO: Class distribution (print + bar chart)
+
+# TODO: Torque distribution by failure type (histogram, failures only)
+
+# TODO: Tool wear distribution by failure type
+
+# TODO: Type distribution
+
+
+--- Cell 8 (markdown) ---
+### **1.4** <font color=red>[3 marks]</font> Feature Engineering
+
+Compute the following derived features for all three datasets:
+
+**Mechanical power** (Watts):
+$$P = \text{Torque} \times \frac{\text{Rotational speed} \times 2\pi}{60}$$
+
+**Temperature differential**:
+$$\Delta T = \text{Process temperature} - \text{Air temperature}$$
+
+Print the mean of each new feature grouped by `Failure_Type`.
+
+
+--- Cell 9 (code) ---
+def engineer_features(df):
+    df = df.copy()
+    # TODO: Compute Power_W
+    # TODO: Compute Temp_diff
+    return df
+
+train   = engineer_features(train)
+current = engineer_features(current)
+stress  = engineer_features(stress)
+
+# TODO: Print grouped mean
+
+
+--- Cell 10 (markdown) ---
+## **2. Experiment Tracking & Model Selection** <font color=red>[15 marks]</font>
+
+--- Cell 11 (markdown) ---
+### **2.1** <font color=red>[2 marks]</font> Setup: features, split, SMOTE
+
+Use the features below. Apply a stratified 80/20 train-val split (random_state=42).
+Apply SMOTE to the training split only. Print the post-SMOTE class distribution.
+
+```
+FEATURES = ['Type_enc', 'Air temperature', 'Process temperature',
+            'Rotational speed', 'Torque', 'Tool wear', 'Power_W', 'Temp_diff']
+```
+
+> In a markdown cell below the code, explain in 2–3 sentences why SMOTE is applied
+> only to the training split and not the validation set.
+
+
+--- Cell 12 (code) ---
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
+from imblearn.over_sampling import SMOTE
+
+# TODO: Encode Type column
+le = LabelEncoder()
+train['Type_enc']   = le.fit_transform(train['Type'])
+current['Type_enc'] = le.transform(current['Type'])
+stress['Type_enc']  = le.transform(stress['Type'])
+
+FEATURES = ['Type_enc', 'Air temperature', 'Process temperature',
+            'Rotational speed', 'Torque', 'Tool wear', 'Power_W', 'Temp_diff']
+
+# TODO: Define X and y
+# TODO: Train-val split
+# TODO: Apply SMOTE (k_neighbors=3, random_state=42)
+# TODO: Print post-SMOTE class distribution
+
+
+--- Cell 13 (markdown) ---
+*Your explanation here: why is SMOTE applied only on the training split?*
+
+--- Cell 14 (markdown) ---
+### **2.2** <font color=red>[8 marks]</font> Train and log 4 models with MLflow
+
+Train and evaluate:
+- Logistic Regression
+- Random Forest (n_estimators=100)
+- XGBoost (n_estimators=100)
+- LightGBM (n_estimators=100)
+
+MLflow experiment name: `PredMaint_ModelSelection`
+
+For each run log: `model` (param), `macro_f1`, `weighted_f1`, `accuracy` (metrics),
+and per-class F1 for all 5 classes. Print a comparison table. Pick the best model by macro F1.
+
+
+--- Cell 15 (code) ---
+import mlflow
+import mlflow.sklearn
+from sklearn.metrics import f1_score, accuracy_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
+
+mlflow.set_tracking_uri('sqlite:///mlflow.db')
+mlflow.set_experiment('PredMaint_ModelSelection')
+
+CLASS_LIST = [0, 1, 2, 3, 4]
+results = {}
+
+models_to_run = {
+    'LogisticRegression': Pipeline([
+        ('scaler', StandardScaler()),
+        ('lr', LogisticRegression(max_iter=2000, random_state=42,
+                                  class_weight='balanced'))
+    ]),
+    'RandomForest':       RandomForestClassifier(n_estimators=100, random_state=42,
+                                                  class_weight='balanced'),
+    'XGBoost':            XGBClassifier(n_estimators=100, random_state=42,
+                                         eval_metric='mlogloss', verbosity=0),
+    'LightGBM':           LGBMClassifier(n_estimators=100, random_state=42,
+                                          class_weight='balanced', verbose=-1),
+}
+
+# TODO: For each model:
+#   - Start an MLflow run
+#   - Fit on X_res, y_res
+#   - Predict on X_val
+#   - Compute and log macro_f1, weighted_f1, accuracy, per-class F1
+#   - Log the model artefact (use input_example=X_val.iloc[:5])
+
+# TODO: Print comparison table
+# TODO: Identify best model by macro F1
+
+
+--- Cell 16 (markdown) ---
+### **2.3** <font color=red>[5 marks]</font> Optuna tuning + MLflow Model Registry
+
+Run an Optuna study (30 trials, `TPESampler(seed=42)`) tuning XGBoost hyperparameters.
+Optimise for `macro_f1` on `X_val`.
+
+MLflow experiment: `PredMaint_Optuna`
+
+Register the best model as `PredMaint_XGBoost` and promote it to the `production` alias.
+Print the improvement in macro F1 over the baseline XGBoost.
+
+
+--- Cell 17 (code) ---
+import optuna
+import joblib
+
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+mlflow.set_experiment('PredMaint_Optuna')
+
+def objective(trial):
+    params = {
+        'n_estimators':      trial.suggest_int('n_estimators', 100, 500),
+        'max_depth':         trial.suggest_int('max_depth', 3, 10),
+        'learning_rate':     trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        'min_child_weight':  trial.suggest_float('min_child_weight', 1.0, 10.0),
+        'subsample':         trial.suggest_float('subsample', 0.6, 1.0),
+        'colsample_bytree':  trial.suggest_float('colsample_bytree', 0.6, 1.0),
+        'gamma':             trial.suggest_float('gamma', 0.0, 2.0),
+        'reg_alpha':         trial.suggest_float('reg_alpha', 1e-8, 1.0, log=True),
+        'reg_lambda':        trial.suggest_float('reg_lambda', 1e-8, 5.0, log=True),
+        'random_state': 42, 'eval_metric': 'mlogloss', 'verbosity': 0,
+    }
+    # TODO: Train XGBoost model, return macro_f1 on X_val
+
+study = optuna.create_study(direction='maximize',
+                            sampler=optuna.samplers.TPESampler(seed=42))
+# TODO: Run study.optimize
+
+# TODO: Train final best model
+# TODO: Log to MLflow, register as 'PredMaint_XGBoost', promote to production alias
+# TODO: Save with joblib.dump
+
+
+--- Cell 18 (markdown) ---
+## **3. Drift Detection & Monitoring** <font color=red>[10 marks]</font>
+
+> Hint before running Evidently: compare simple statistics first (for example, mean `Rotational speed` in `current` vs `stress`).
+> Reminder: passing Pandera only means values are valid; it does **not** mean the batch is in-distribution.
+> Section objective: identify why the deployed model is stale on stress conditions.
+
+--- Cell 19 (markdown) ---
+### **3.1** <font color=red>[4 marks]</font> Evidently — current batch
+
+Reference: `train[FEAT_COLS]` | Current: `current[FEAT_COLS]`
+
+```
+FEAT_COLS = ['Air temperature', 'Process temperature',
+             'Rotational speed', 'Torque', 'Tool wear']
+```
+
+Run `DataDriftPreset`. Save HTML to `drift_current.html`.
+Report: drift detected? How many features drifted?
+
+
+--- Cell 20 (code) ---
+from evidently.legacy.report import Report
+from evidently.legacy.metric_preset import DataDriftPreset
+
+FEAT_COLS = ['Air temperature', 'Process temperature',
+             'Rotational speed', 'Torque', 'Tool wear']
+
+# TODO: Run Evidently on current batch, save drift_current.html, print summary
+
+
+--- Cell 21 (markdown) ---
+### **3.2** <font color=red>[4 marks]</font> Evidently - stress batch
+
+Repeat for `stress.csv`. Use `ColumnDriftMetric` for individual feature scores.
+Save as `drift_stress.html`.
+Print a table: feature | drift detected | Wasserstein score | ref mean | current mean | delta.
+
+Focus question: this section is about diagnosing *staleness risk* (what shifted and why), not "making stress predictions look good."
+
+--- Cell 22 (code) ---
+from evidently.legacy.metrics.data_drift.dataset_drift_metric import DatasetDriftMetric
+from evidently.legacy.metrics.data_drift.column_drift_metric import ColumnDriftMetric
+
+# TODO: Run Evidently on stress batch with per-column metrics
+# TODO: Save drift_stress.html
+# TODO: Print per-column drift table
+
+
+--- Cell 23 (markdown) ---
+### **3.3** <font color=red>[2 marks]</font> Retraining decision
+
+Answer the following in a markdown cell:
+1. Which features drifted in the stress batch?
+2. Cross-referencing with your SHAP results (Section 4) ? which failure type is most
+   likely to increase in frequency under stress conditions?
+3. Should the model be retrained? Justify with evidence from Sections 3.1, 3.2, and 4.
+
+Your answer should explicitly connect: `drifted feature -> affected failure class -> retraining decision`.
+
+--- Cell 24 (markdown) ---
+**Your answer here:**
+
+1. Features that drifted: ...
+2. Most likely failure type to increase: ...
+3. Retraining recommendation: ...
+
+
+--- Cell 25 (markdown) ---
+## **4. Explainability & Insights** <font color=red>[5 marks]</font>
+
+> For multiclass tree models, SHAP returns an array of shape `(n_samples, n_features, n_classes)`.
+>
+> **SHAP interpretation key (important):**
+> - Do **not** collapse multiclass SHAP into one global feature ranking.
+> - Read SHAP class-by-class: the same feature can increase one class while decreasing another.
+> - Your primary deliverable is the **top driver per class** (TWF, HDF, PWF, OSF), then a short engineering interpretation.
+
+--- Cell 26 (markdown) ---
+### **4.1** <font color=red>[3 marks]</font> SHAP analysis per failure class
+
+Load `best_model.pkl`. Use `shap.TreeExplainer` on `train[FEATURES]`.
+Plot mean |SHAP| bar charts for TWF, HDF, PWF, OSF (4 subplots). Save as `shap_per_class.png`.
+Print the top driver for each failure class.
+
+Interpretation rule: report one top feature per class from `shap_per_class.png`; avoid a single cross-class "global winner."
+
+--- Cell 27 (code) ---
+import shap
+
+best_model = joblib.load('best_model.pkl')
+
+# TODO: Compute SHAP values using TreeExplainer
+# TODO: Plot 4-subplot bar chart (one per failure class)
+# TODO: Save shap_per_class.png
+# TODO: Print top driver per class
+
+
+--- Cell 28 (markdown) ---
+### **4.2** <font color=red>[2 marks]</font> Engineering insight
+
+Answer in this markdown cell:
+
+1. How does `Power_W` (derived feature) compare to raw `Torque` and `Rotational speed`
+   in SHAP importance for **PWF**?
+2. How does `Temp_diff` rank for **HDF** vs other failure types?
+3. In 2-3 sentences, describe the physical mechanism behind each failure type based on SHAP.
+
+Suggested structure for your actionable recommendation (used again in Section 5.1.5):
+- **Condition:** (feature threshold or shift observed)
+- **Risked failure class:** (from class-specific SHAP)
+- **Action:** (specific maintenance or monitoring step)
+
+--- Cell 29 (markdown) ---
+**Your answer here:**
+
+1. Power_W for PWF: ...
+2. Temp_diff for HDF: ...
+3. Physical mechanisms: ...
+
+
+--- Cell 30 (markdown) ---
+## **5. Conclusions** <font color=red>[5 marks]</font>
+
+--- Cell 31 (markdown) ---
+### **5.1** <font color=red>[5 marks]</font> Key findings
+
+Write a structured conclusion (1 mark per point):
+
+1. Which model won and why - reference macro F1 numbers.
+2. Why accuracy is misleading here - operational cost implication.
+3. TWF has F1 = 0.0 even after SMOTE + Optuna. Root cause and fix.
+   - Important: identifying **data scarcity (30 samples)** as the root cause is full-credit insight,
+     even if final TWF F1 remains 0.0.
+4. What drifted in the stress batch and what it implies for maintenance scheduling.
+5. One actionable recommendation for the engineering team based on SHAP.
+
+--- Cell 32 (markdown) ---
+## Conclusions
+
+**1. Model selection:**
+...
+
+**2. Accuracy vs Macro F1:**
+...
+
+**3. The TWF problem:**
+State this as a data engineering limitation first (rare class with only 30 real samples),
+then propose what data should be collected next.
+
+**4. Drift and maintenance schedule:**
+...
+
+**5. Actionable recommendation:**
+Use this format: Condition -> Risked failure class -> Action.
